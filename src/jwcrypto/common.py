@@ -1,7 +1,7 @@
 # Copyright (C) 2015 JWCrypto Project Contributors - see LICENSE file
 
-from base64 import urlsafe_b64encode, urlsafe_b64decode
 import json
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 
 
 # Padding stripping versions as described in
@@ -31,7 +31,7 @@ def base64url_decode(payload):
 def json_encode(string):
     if isinstance(string, bytes):
         string = string.decode('utf-8')
-    return json.dumps(string, separators=(',', ':'))
+    return json.dumps(string, separators=(',', ':'), sort_keys=True)
 
 
 def json_decode(string):
@@ -40,9 +40,67 @@ def json_decode(string):
     return json.loads(string)
 
 
-class InvalidJWAAlgorithm(Exception):
+class JWException(Exception):
+    pass
+
+
+class InvalidJWAAlgorithm(JWException):
     def __init__(self, message=None):
-        msg = 'Invalid JWS Algorithm name'
+        msg = 'Invalid JWA Algorithm name'
         if message:
             msg += ' (%s)' % message
         super(InvalidJWAAlgorithm, self).__init__(msg)
+
+
+class InvalidCEKeyLength(JWException):
+    """Invalid CEK Key Length.
+
+    This exception is raised when a Content Encryption Key does not match
+    the required lenght.
+    """
+
+    def __init__(self, expected, obtained):
+        msg = 'Expected key of length %d bits, got %d' % (expected, obtained)
+        super(InvalidCEKeyLength, self).__init__(msg)
+
+
+class InvalidJWEOperation(JWException):
+    """Invalid JWS Object.
+
+    This exception is raised when a requested operation cannot
+    be execute due to unsatisfied conditions.
+    """
+
+    def __init__(self, message=None, exception=None):
+        msg = None
+        if message:
+            msg = message
+        else:
+            msg = 'Unknown Operation Failure'
+        if exception:
+            msg += ' {%s}' % repr(exception)
+        super(InvalidJWEOperation, self).__init__(msg)
+
+
+class InvalidJWEKeyType(JWException):
+    """Invalid JWE Key Type.
+
+    This exception is raised when the provided JWK Key does not match
+    the type required by the sepcified algorithm.
+    """
+
+    def __init__(self, expected, obtained):
+        msg = 'Expected key type %s, got %s' % (expected, obtained)
+        super(InvalidJWEKeyType, self).__init__(msg)
+
+
+class InvalidJWEKeyLength(JWException):
+    """Invalid JWE Key Length.
+
+    This exception is raised when the provided JWK Key does not match
+    the lenght required by the sepcified algorithm.
+    """
+
+    def __init__(self, expected, obtained):
+        msg = 'Expected key of lenght %d, got %d' % (expected, obtained)
+        super(InvalidJWEKeyLength, self).__init__(msg)

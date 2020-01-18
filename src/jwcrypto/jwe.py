@@ -1,17 +1,11 @@
 # Copyright (C) 2015 JWCrypto Project Contributors - see LICENSE file
 
-from binascii import hexlify, unhexlify
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import constant_time, hashes, hmac
-from cryptography.hazmat.primitives.padding import PKCS7
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from jwcrypto.common import base64url_encode, base64url_decode
-from jwcrypto.common import InvalidJWAAlgorithm
-from jwcrypto.common import json_decode, json_encode
-from jwcrypto.jwk import JWK
-import os
 import zlib
+
+from jwcrypto import common
+from jwcrypto.common import base64url_decode, base64url_encode
+from jwcrypto.common import json_decode, json_encode
+from jwcrypto.jwa import JWA
 
 
 # RFC 7516 - 4.1
@@ -46,22 +40,6 @@ default_allowed_algs = [
 """Default allowed algorithms"""
 
 
-# Note: l is the number of bits, which should be a multiple of 16
-def _encode_int(n, l):
-    e = hex(n).rstrip("L").lstrip("0x")
-    el = len(e)
-    L = ((l + 7) // 8) * 2  # number of bytes rounded up times 2 chars/bytes
-    if el > L:
-        e = e[:L]
-    else:
-        e = '0' * (L - el) + e  # pad as necessary
-    return unhexlify(e)
-
-
-def _decode_int(n):
-    return int(hexlify(n), 16)
-
-
 class InvalidJWEData(Exception):
     """Invalid JWE Object.
 
@@ -80,312 +58,11 @@ class InvalidJWEData(Exception):
         super(InvalidJWEData, self).__init__(msg)
 
 
-class InvalidCEKeyLength(Exception):
-    """Invalid CEK Key Length.
-
-    This exception is raised when a Content Encryption Key does not match
-    the required lenght.
-    """
-
-    def __init__(self, expected, obtained):
-        msg = 'Expected key of length %d, got %d' % (expected, obtained)
-        super(InvalidCEKeyLength, self).__init__(msg)
-
-
-class InvalidJWEOperation(Exception):
-    """Invalid JWS Object.
-
-    This exception is raised when a requested operation cannot
-    be execute due to unsatisfied conditions.
-    """
-
-    def __init__(self, message=None, exception=None):
-        msg = None
-        if message:
-            msg = message
-        else:
-            msg = 'Unknown Operation Failure'
-        if exception:
-            msg += ' {%s}' % repr(exception)
-        super(InvalidJWEOperation, self).__init__(msg)
-
-
-class InvalidJWEKeyType(Exception):
-    """Invalid JWE Key Type.
-
-    This exception is raised when the provided JWK Key does not match
-    the type required by the sepcified algorithm.
-    """
-
-    def __init__(self, expected, obtained):
-        msg = 'Expected key type %s, got %s' % (expected, obtained)
-        super(InvalidJWEKeyType, self).__init__(msg)
-
-
-class InvalidJWEKeyLength(Exception):
-    """Invalid JWE Key Length.
-
-    This exception is raised when the provided JWK Key does not match
-    the lenght required by the sepcified algorithm.
-    """
-
-    def __init__(self, expected, obtained):
-        msg = 'Expected key of lenght %d, got %d' % (expected, obtained)
-        super(InvalidJWEKeyLength, self).__init__(msg)
-
-
-class _raw_key_mgmt(object):
-
-    def wrap(self, key, keylen, cek):
-        raise NotImplementedError
-
-    def unwrap(self, key, ek):
-        raise NotImplementedError
-
-
-class _rsa(_raw_key_mgmt):
-
-    def __init__(self, padfn):
-        self.padfn = padfn
-
-    def check_key(self, key):
-        if key.key_type != 'RSA':
-            raise InvalidJWEKeyType('RSA', key.key_type)
-
-    # FIXME: get key size and insure > 2048 bits
-    def wrap(self, key, keylen, cek):
-        self.check_key(key)
-        if not cek:
-            cek = os.urandom(keylen)
-        rk = key.get_op_key('encrypt')
-        ek = rk.encrypt(cek, self.padfn)
-        return (cek, ek)
-
-    def unwrap(self, key, ek):
-        self.check_key(key)
-        rk = key.get_op_key('decrypt')
-        cek = rk.decrypt(ek, self.padfn)
-        return cek
-
-
-class _aes_kw(_raw_key_mgmt):
-
-    def __init__(self, keysize):
-        self.backend = default_backend()
-        self.keysize = keysize // 8
-
-    def get_key(self, key, op):
-        if key.key_type != 'oct':
-            raise InvalidJWEKeyType('oct', key.key_type)
-        rk = base64url_decode(key.get_op_key(op))
-        if len(rk) != self.keysize:
-            raise InvalidJWEKeyLength(self.keysize * 8, len(rk) * 8)
-        return rk
-
-    def wrap(self, key, keylen, cek):
-        rk = self.get_key(key, 'encrypt')
-        if not cek:
-            cek = os.urandom(keylen)
-
-        # Implement RFC 3394 Key Unwrap - 2.2.2
-        # TODO: Use cryptography once issue #1733 is resolved
-        iv = 'a6a6a6a6a6a6a6a6'
-        A = unhexlify(iv)
-        R = [cek[i:i+8] for i in range(0, len(cek), 8)]
-        n = len(R)
-        for j in range(0, 6):
-            for i in range(0, n):
-                e = Cipher(algorithms.AES(rk), modes.ECB(),
-                           backend=self.backend).encryptor()
-                B = e.update(A + R[i]) + e.finalize()
-                A = _encode_int(_decode_int(B[:8]) ^ ((n*j)+i+1), 64)
-                R[i] = B[-8:]
-        ek = A
-        for i in range(0, n):
-            ek += R[i]
-        return (cek, ek)
-
-    def unwrap(self, key, ek):
-        rk = self.get_key(key, 'decrypt')
-
-        # Implement RFC 3394 Key Unwrap - 2.2.3
-        # TODO: Use cryptography once issue #1733 is resolved
-        iv = 'a6a6a6a6a6a6a6a6'
-        Aiv = unhexlify(iv)
-
-        R = [ek[i:i+8] for i in range(0, len(ek), 8)]
-        A = R.pop(0)
-        n = len(R)
-        for j in range(5, -1, -1):
-            for i in range(n - 1, -1, -1):
-                AtR = _encode_int((_decode_int(A) ^ ((n*j)+i+1)), 64) + R[i]
-                d = Cipher(algorithms.AES(rk), modes.ECB(),
-                           backend=self.backend).decryptor()
-                B = d.update(AtR) + d.finalize()
-                A = B[:8]
-                R[i] = B[-8:]
-
-        if A != Aiv:
-            raise InvalidJWEData('Decryption Failed')
-
-        cek = b''.join(R)
-        return cek
-
-
-class _direct(_raw_key_mgmt):
-
-    def check_key(self, key):
-        if key.key_type != 'oct':
-            raise InvalidJWEKeyType('oct', key.key_type)
-
-    def wrap(self, key, keylen, cek):
-        self.check_key(key)
-        if cek:
-            return (cek, None)
-        k = base64url_decode(key.get_op_key('encrypt'))
-        if len(k) != keylen:
-            raise InvalidCEKeyLength(keylen, len(k))
-        return (k, '')
-
-    def unwrap(self, key, ek):
-        self.check_key(key)
-        if ek != b'':
-            raise InvalidJWEData('Invalid Encryption Key.')
-        return base64url_decode(key.get_op_key('decrypt'))
-
-
-class _raw_jwe(object):
-
-    def encrypt(self, k, a, m):
-        raise NotImplementedError
-
-    def decrypt(self, k, a, iv, e, t):
-        raise NotImplementedError
-
-
-class _aes_cbc_hmac_sha2(_raw_jwe):
-
-    def __init__(self, hashfn, keybits):
-        self.backend = default_backend()
-        self.hashfn = hashfn
-        self.keysize = keybits // 8
-        self.blocksize = algorithms.AES.block_size
-
-    @property
-    def key_size(self):
-        return self.keysize * 2
-
-    def _mac(self, k, a, iv, e):
-        al = _encode_int(len(a * 8), 64)
-        h = hmac.HMAC(k, self.hashfn, backend=self.backend)
-        h.update(a)
-        h.update(iv)
-        h.update(e)
-        h.update(al)
-        m = h.finalize()
-        return m[:self.keysize]
-
-    # RFC 7518 - 5.2.2
-    def encrypt(self, k, a, m):
-        """ Encrypt accoriding to the selected encryption and hashing
-        functions.
-
-        :param k: Encryption key (optional)
-        :param a: Additional Authentication Data
-        :param m: Plaintext
-
-        Returns a dictionary with the computed data.
-        """
-        hkey = k[:self.keysize]
-        ekey = k[self.keysize:]
-
-        # encrypt
-        iv = os.urandom(self.blocksize // 8)
-        cipher = Cipher(algorithms.AES(ekey), modes.CBC(iv),
-                        backend=self.backend)
-        encryptor = cipher.encryptor()
-        padder = PKCS7(self.blocksize).padder()
-        padded_data = padder.update(m) + padder.finalize()
-        e = encryptor.update(padded_data) + encryptor.finalize()
-
-        # mac
-        t = self._mac(hkey, a, iv, e)
-
-        return (iv, e, t)
-
-    def decrypt(self, k, a, iv, e, t):
-        """ Decrypt accoriding to the selected encryption and hashing
-        functions.
-        :param k: Encryption key (optional)
-        :param a: Additional Authenticated Data
-        :param iv: Initialization Vector
-        :param e: Ciphertext
-        :param t: Authentication Tag
-
-        Returns plaintext or raises an error
-        """
-        hkey = k[:self.keysize]
-        dkey = k[self.keysize:]
-
-        # verify mac
-        if not constant_time.bytes_eq(t, self._mac(hkey, a, iv, e)):
-            raise InvalidJWEData('Failed to verify MAC')
-
-        # decrypt
-        cipher = Cipher(algorithms.AES(dkey), modes.CBC(iv),
-                        backend=self.backend)
-        decryptor = cipher.decryptor()
-        d = decryptor.update(e) + decryptor.finalize()
-        unpadder = PKCS7(self.blocksize).unpadder()
-        return unpadder.update(d) + unpadder.finalize()
-
-
-class _aes_gcm(_raw_jwe):
-
-    def __init__(self, keybits):
-        self.backend = default_backend()
-        self.keysize = keybits // 8
-
-    @property
-    def key_size(self):
-        return self.keysize
-
-    # RFC 7518 - 5.3
-    def encrypt(self, k, a, m):
-        """ Encrypt accoriding to the selected encryption and hashing
-        functions.
-
-        :param k: Encryption key (optional)
-        :param a: Additional Authentication Data
-        :param m: Plaintext
-
-        Returns a dictionary with the computed data.
-        """
-        iv = os.urandom(96 // 8)
-        cipher = Cipher(algorithms.AES(k), modes.GCM(iv),
-                        backend=self.backend)
-        encryptor = cipher.encryptor()
-        encryptor.authenticate_additional_data(a)
-        e = encryptor.update(m) + encryptor.finalize()
-
-        return (iv, e, encryptor.tag)
-
-    def decrypt(self, k, a, iv, e, t):
-        """ Decrypt accoriding to the selected encryption and hashing
-        functions.
-        :param k: Encryption key (optional)
-        :param a: Additional Authenticated Data
-        :param iv: Initialization Vector
-        :param e: Ciphertext
-        :param t: Authentication Tag
-
-        Returns plaintext or raises an error
-        """
-        cipher = Cipher(algorithms.AES(k), modes.GCM(iv, t),
-                        backend=self.backend)
-        decryptor = cipher.decryptor()
-        decryptor.authenticate_additional_data(a)
-        return decryptor.update(e) + decryptor.finalize()
+# These have been moved to jwcrypto.common, maintain here for bacwards compat
+InvalidCEKeyLength = common.InvalidCEKeyLength
+InvalidJWEKeyLength = common.InvalidJWEKeyLength
+InvalidJWEKeyType = common.InvalidJWEKeyType
+InvalidJWEOperation = common.InvalidJWEOperation
 
 
 class JWE(object):
@@ -395,7 +72,7 @@ class JWE(object):
     """
 
     def __init__(self, plaintext=None, protected=None, unprotected=None,
-                 aad=None, algs=None):
+                 aad=None, algs=None, recipient=None, header=None):
         """Creates a JWE token.
 
         :param plaintext(bytes): An arbitrary plaintext to be encrypted.
@@ -403,6 +80,8 @@ class JWE(object):
         :param unprotected: A JSON string with the shared unprotected header.
         :param aad(bytes): Arbitrary additional authenticated data
         :param algs: An optional list of allowed algorithms
+        :param recipient: An optional, default recipient key
+        :param header: An optional header for the default recipient
         """
         self._allowed_algs = None
         self.objects = dict()
@@ -417,69 +96,36 @@ class JWE(object):
         if aad:
             self.objects['aad'] = aad
         if protected:
-            _ = json_decode(protected)  # check header encoding
+            if isinstance(protected, dict):
+                protected = json_encode(protected)
+            else:
+                json_decode(protected)  # check header encoding
             self.objects['protected'] = protected
         if unprotected:
-            _ = json_decode(unprotected)  # check header encoding
+            if isinstance(unprotected, dict):
+                unprotected = json_encode(unprotected)
+            else:
+                json_decode(unprotected)  # check header encoding
             self.objects['unprotected'] = unprotected
         if algs:
             self.allowed_algs = algs
 
-    # key wrapping mechanisms
-    def _jwa_RSA1_5(self):
-        return _rsa(padding.PKCS1v15())
+        if recipient:
+            self.add_recipient(recipient, header=header)
+        elif header:
+            raise ValueError('Header is allowed only with default recipient')
 
-    def _jwa_RSA_OAEP(self):
-        return _rsa(padding.OAEP(padding.MGF1(hashes.SHA1()),
-                                 hashes.SHA1(),
-                                 None))
-
-    def _jwa_RSA_OAEP_256(self):
-        return _rsa(padding.OAEP(padding.MGF1(hashes.SHA256()),
-                                 hashes.SHA256(),
-                                 None))
-
-    def _jwa_A128KW(self):
-        return _aes_kw(128)
-
-    def _jwa_A192KW(self):
-        return _aes_kw(192)
-
-    def _jwa_A256KW(self):
-        return _aes_kw(256)
-
-    def _jwa_dir(self):
-        return _direct()
-
-    # content encryption mechanisms
-    def _jwa_A128CBC_HS256(self):
-        return _aes_cbc_hmac_sha2(hashes.SHA256(), 128)
-
-    def _jwa_A192CBC_HS384(self):
-        return _aes_cbc_hmac_sha2(hashes.SHA384(), 192)
-
-    def _jwa_A256CBC_HS512(self):
-        return _aes_cbc_hmac_sha2(hashes.SHA512(), 256)
-
-    def _jwa_A128GCM(self):
-        return _aes_gcm(128)
-
-    def _jwa_A192GCM(self):
-        return _aes_gcm(192)
-
-    def _jwa_A256GCM(self):
-        return _aes_gcm(256)
-
-    def _jwa(self, name):
-        try:
-            attr = '_jwa_%s' % name.replace('-', '_').replace('+', '_')
-            fn = getattr(self, attr)
-        except (KeyError, AttributeError):
-            raise InvalidJWAAlgorithm()
+    def _jwa_keymgmt(self, name):
         allowed = self._allowed_algs or default_allowed_algs
         if name not in allowed:
             raise InvalidJWEOperation('Algorithm not allowed')
-        return fn()
+        return JWA.keymgmt_alg(name)
+
+    def _jwa_enc(self, name):
+        allowed = self._allowed_algs or default_allowed_algs
+        if name not in allowed:
+            raise InvalidJWEOperation('Algorithm not allowed')
+        return JWA.encryption_alg(name)
 
     @property
     def allowed_algs(self):
@@ -524,22 +170,40 @@ class JWE(object):
         algname = jh.get('alg', None)
         if algname is None:
             raise InvalidJWEData('Missing "alg" from headers')
-        alg = self._jwa(algname)
+        alg = self._jwa_keymgmt(algname)
         encname = jh.get('enc', None)
         if encname is None:
             raise InvalidJWEData('Missing "enc" from headers')
-        enc = self._jwa(encname)
+        enc = self._jwa_enc(encname)
         return alg, enc
+
+    def _encrypt(self, alg, enc, jh):
+        aad = base64url_encode(self.objects.get('protected', ''))
+        if 'aad' in self.objects:
+            aad += '.' + base64url_encode(self.objects['aad'])
+        aad = aad.encode('utf-8')
+
+        compress = jh.get('zip', None)
+        if compress == 'DEF':
+            data = zlib.compress(self.plaintext)[2:-4]
+        elif compress is None:
+            data = self.plaintext
+        else:
+            raise ValueError('Unknown compression')
+
+        iv, ciphertext, tag = enc.encrypt(self.cek, aad, data)
+        self.objects['iv'] = iv
+        self.objects['ciphertext'] = ciphertext
+        self.objects['tag'] = tag
 
     def add_recipient(self, key, header=None):
         """Encrypt the plaintext with the given key.
 
-        :param key: A JWK key of appropriate type for the 'alg' provided
-         in the JOSE Headers.
+        :param key: A JWK key or password of appropriate type for the 'alg'
+         provided in the JOSE Headers.
         :param header: A JSON string representing the per-recipient header.
 
         :raises ValueError: if the plaintext is missing or not of type bytes.
-        :raises ValueError: if the key is not a JWK object.
         :raises ValueError: if the compression type is unknown.
         :raises InvalidJWAAlgorithm: if the 'alg' provided in the JOSE
          headers is missing or unknown, or otherwise not implemented.
@@ -548,8 +212,9 @@ class JWE(object):
             raise ValueError('Missing plaintext')
         if not isinstance(self.plaintext, bytes):
             raise ValueError("Plaintext must be 'bytes'")
-        if not isinstance(key, JWK):
-            raise ValueError('key is not a JWK object')
+
+        if isinstance(header, dict):
+            header = json_encode(header)
 
         jh = self._get_jose_header(header)
         alg, enc = self._get_alg_enc_from_headers(jh)
@@ -558,28 +223,19 @@ class JWE(object):
         if header:
             rec['header'] = header
 
-        self.cek, ek = alg.wrap(key, enc.key_size, self.cek)
-        if ek:
-            rec['encrypted_key'] = ek
+        wrapped = alg.wrap(key, enc.wrap_key_size, self.cek, jh)
+        self.cek = wrapped['cek']
+
+        if 'ek' in wrapped:
+            rec['encrypted_key'] = wrapped['ek']
+
+        if 'header' in wrapped:
+            h = json_decode(rec.get('header', '{}'))
+            nh = self._merge_headers(h, wrapped['header'])
+            rec['header'] = json_encode(nh)
 
         if 'ciphertext' not in self.objects:
-            aad = base64url_encode(self.objects.get('protected', ''))
-            if 'aad' in self.objects:
-                aad += '.' + base64url_encode(self.objects['aad'])
-            aad = aad.encode('utf-8')
-
-            compress = jh.get('zip', None)
-            if compress == 'DEF':
-                data = zlib.compress(self.plaintext)[2:-4]
-            elif compress is None:
-                data = self.plaintext
-            else:
-                raise ValueError('Unknown compression')
-
-            iv, ciphertext, tag = enc.encrypt(self.cek, aad, data)
-            self.objects['iv'] = iv
-            self.objects['ciphertext'] = ciphertext
-            self.objects['tag'] = tag
+            self._encrypt(alg, enc, jh)
 
         if 'recipients' in self.objects:
             self.objects['recipients'].append(rec)
@@ -587,11 +243,9 @@ class JWE(object):
             self.objects['recipients'] = list()
             n = dict()
             if 'encrypted_key' in self.objects:
-                n['encrypted_key'] = self.objects['encrypted_key']
-                del self.objects['encrypted_key']
+                n['encrypted_key'] = self.objects.pop('encrypted_key')
             if 'header' in self.objects:
-                n['header'] = self.objects['header']
-                del self.objects['header']
+                n['header'] = self.objects.pop('header')
             self.objects['recipients'].append(n)
             self.objects['recipients'].append(rec)
         else:
@@ -604,7 +258,7 @@ class JWE(object):
          representation, otherwise generates a standard JSON format.
 
         :raises InvalidJWEOperation: if the object cannot serialized
-         with the compact representation and `compat` is True.
+         with the compact representation and `compact` is True.
         :raises InvalidJWEOperation: if no recipients have been added
          to the object.
         """
@@ -616,12 +270,26 @@ class JWE(object):
             for invalid in 'aad', 'unprotected':
                 if invalid in self.objects:
                     raise InvalidJWEOperation("Can't use compact encoding")
-            if 'recipiens' in self.objects:
+            if 'recipients' in self.objects:
                 if len(self.objects['recipients']) != 1:
                     raise InvalidJWEOperation("Invalid number of recipients")
                 rec = self.objects['recipients'][0]
             else:
                 rec = self.objects
+            if 'header' in rec:
+                # The AESGCMKW algorithm generates data (iv, tag) we put in the
+                # per-recipient unpotected header by default. Move it to the
+                # protected header and re-encrypt the payload, as the protected
+                # header is used as additional authenticated data.
+                h = json_decode(rec['header'])
+                ph = json_decode(self.objects['protected'])
+                nph = self._merge_headers(h, ph)
+                self.objects['protected'] = json_encode(nph)
+                jh = self._get_jose_header()
+                alg, enc = self._get_alg_enc_from_headers(jh)
+                self._encrypt(alg, enc, jh)
+                del rec['header']
+
             return '.'.join([base64url_encode(self.objects['protected']),
                              base64url_encode(rec.get('encrypted_key', '')),
                              base64url_encode(self.objects['iv']),
@@ -673,14 +341,15 @@ class JWE(object):
         # TODO: allow caller to specify list of headers it understands
         self._check_crit(jh.get('crit', dict()))
 
-        alg = self._jwa(jh.get('alg', None))
-        enc = self._jwa(jh.get('enc', None))
+        alg = self._jwa_keymgmt(jh.get('alg', None))
+        enc = self._jwa_enc(jh.get('enc', None))
 
         aad = base64url_encode(self.objects.get('protected', ''))
         if 'aad' in self.objects:
             aad += '.' + base64url_encode(self.objects['aad'])
 
-        cek = alg.unwrap(key, ppe.get('encrypted_key', b''))
+        cek = alg.unwrap(key, enc.wrap_key_size,
+                         ppe.get('encrypted_key', b''), jh)
         data = enc.decrypt(cek, aad.encode('utf-8'),
                            self.objects['iv'],
                            self.objects['ciphertext'],
@@ -701,14 +370,14 @@ class JWE(object):
         """Decrypt a JWE token.
 
         :param key: The (:class:`jwcrypto.jwk.JWK`) decryption key.
+        :param key: A (:class:`jwcrypto.jwk.JWK`) decryption key or a password
+         string (optional).
 
         :raises InvalidJWEOperation: if the key is not a JWK object.
         :raises InvalidJWEData: if the ciphertext can't be decrypted or
          the object is otherwise malformed.
         """
 
-        if not isinstance(key, JWK):
-            raise ValueError('key is not a JWK object')
         if 'ciphertext' not in self.objects:
             raise InvalidJWEOperation("No available ciphertext")
         self.decryptlog = list()
@@ -737,8 +406,9 @@ class JWE(object):
 
         :param raw_jwe: a 'raw' JWE token (JSON Encoded or Compact
          notation) string.
-        :param key: A (:class:`jwcrypto.jwk.JWK`) decryption key (optional).
-         If a key is provided a idecryption step will be attempted after
+        :param key: A (:class:`jwcrypto.jwk.JWK`) decryption key or a password
+         string (optional).
+         If a key is provided a decryption step will be attempted after
          the object is successfully deserialized.
 
         :raises InvalidJWEData: if the raw object is an invaid JWE token.
@@ -753,30 +423,30 @@ class JWE(object):
         try:
             try:
                 djwe = json_decode(raw_jwe)
-                o['iv'] = base64url_decode(str(djwe['iv']))
-                o['ciphertext'] = base64url_decode(str(djwe['ciphertext']))
-                o['tag'] = base64url_decode(str(djwe['tag']))
+                o['iv'] = base64url_decode(djwe['iv'])
+                o['ciphertext'] = base64url_decode(djwe['ciphertext'])
+                o['tag'] = base64url_decode(djwe['tag'])
                 if 'protected' in djwe:
-                    p = base64url_decode(str(djwe['protected']))
+                    p = base64url_decode(djwe['protected'])
                     o['protected'] = p.decode('utf-8')
                 if 'unprotected' in djwe:
                     o['unprotected'] = json_encode(djwe['unprotected'])
                 if 'aad' in djwe:
-                    o['aad'] = base64url_decode(str(djwe['aad']))
+                    o['aad'] = base64url_decode(djwe['aad'])
                 if 'recipients' in djwe:
                     o['recipients'] = list()
                     for rec in djwe['recipients']:
                         e = dict()
                         if 'encrypted_key' in rec:
                             e['encrypted_key'] = \
-                                base64url_decode(str(rec['encrypted_key']))
+                                base64url_decode(rec['encrypted_key'])
                         if 'header' in rec:
                             e['header'] = json_encode(rec['header'])
                         o['recipients'].append(e)
                 else:
                     if 'encrypted_key' in djwe:
                         o['encrypted_key'] = \
-                            base64url_decode(str(djwe['encrypted_key']))
+                            base64url_decode(djwe['encrypted_key'])
                     if 'header' in djwe:
                         o['header'] = json_encode(djwe['header'])
 
@@ -784,14 +454,14 @@ class JWE(object):
                 c = raw_jwe.split('.')
                 if len(c) != 5:
                     raise InvalidJWEData()
-                p = base64url_decode(str(c[0]))
+                p = base64url_decode(c[0])
                 o['protected'] = p.decode('utf-8')
-                ekey = base64url_decode(str(c[1]))
-                if ekey != '':
-                    o['encrypted_key'] = base64url_decode(str(c[1]))
-                o['iv'] = base64url_decode(str(c[2]))
-                o['ciphertext'] = base64url_decode(str(c[3]))
-                o['tag'] = base64url_decode(str(c[4]))
+                ekey = base64url_decode(c[1])
+                if ekey != b'':
+                    o['encrypted_key'] = base64url_decode(c[1])
+                o['iv'] = base64url_decode(c[2])
+                o['ciphertext'] = base64url_decode(c[3])
+                o['tag'] = base64url_decode(c[4])
 
             self.objects = o
 

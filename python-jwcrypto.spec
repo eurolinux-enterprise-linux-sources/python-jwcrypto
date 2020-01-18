@@ -8,26 +8,26 @@
 %define module_name jwcrypto
 
 Name:           python-jwcrypto
-Version:        0.2.1
+Version:        0.4.2
 Release:        1%{?dist}
 Summary:        Implements JWK,JWS,JWE specifications using python-cryptography
 
 License:        LGPLv3+
-URL:            https://github.com/simo5/%{module_name}
-Source0:        https://github.com/simo5/%{module_name}/releases/download/v%{version}/jwcrypto-%{version}.tar.gz
-Source1:        https://github.com/simo5/%{module_name}/releases/download/v%{version}/jwcrypto-%{version}.tar.gz.sha512sum.txt
+URL:            https://github.com/latchset/%{module_name}
+Source0:        https://github.com/latchset/%{module_name}/releases/download/v%{version}/jwcrypto-%{version}.tar.gz
+Source1:        https://github.com/latchset/%{module_name}/releases/download/v%{version}/jwcrypto-%{version}.tar.gz.sha512sum.txt
 
 BuildArch:      noarch
 BuildRequires:  python-devel
 BuildRequires:  python-setuptools
-BuildRequires:  python-cryptography
+BuildRequires:  python-cryptography >= 1.5
 BuildRequires:  pytest
-Requires:       python-cryptography
+Requires:       python-cryptography >= 1.5
 
 %if 0%{?with_python3}
 BuildRequires:      python3-devel
 BuildRequires:      python3-setuptools
-BuildRequires:      python3-cryptography
+BuildRequires:      python3-cryptography >= 1.5
 BuildRequires:      python3-pytest
 %endif
 
@@ -91,5 +91,11 @@ rm -rf %{buildroot}%{python3_sitelib}/%{module_name}/__pycache__/tests{,-cookboo
 
 
 %changelog
+* Thu Aug 17 2017 Christian Heimes <cheimes@redhat.com> - 0.4.2-1
+- Rebase to 0.4.2, resolves rhbz#1434409
+
+* Mon Apr 04 2016 Christian Heimes <cheimes@redhat.com> - 0.2.1-2
+- Correct download link
+
 * Thu Mar 31 2016 Christian Heimes <cheimes@redhat.com> - 0.2.1-1
 - Initial packaging

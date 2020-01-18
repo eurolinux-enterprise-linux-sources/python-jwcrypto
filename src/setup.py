@@ -6,20 +6,24 @@ from setuptools import setup
 
 setup(
     name = 'jwcrypto',
-    version = '0.2.1',
+    version = '0.4.2',
     license = 'LGPLv3+',
     maintainer = 'JWCrypto Project Contributors',
     maintainer_email = 'simo@redhat.com',
-    url='https://github.com/simo5/jwcrypto',
+    url='https://github.com/latchset/jwcrypto',
     packages = ['jwcrypto'],
     description = 'Implementation of JOSE Web standards',
     classifiers = [
         'Programming Language :: Python :: 2.7',
-        'Programming Language :: Python :: 3.3',
+        'Programming Language :: Python :: 3.4',
+        'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: 3.6',
         'Intended Audience :: Developers',
         'Topic :: Security',
         'Topic :: Software Development :: Libraries :: Python Modules'
     ],
     data_files = [('share/doc/jwcrypto', ['LICENSE', 'README.md'])],
+    install_requires = [
+        'cryptography >= 1.5',
+    ],
 )
-
