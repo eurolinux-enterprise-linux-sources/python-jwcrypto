@@ -1,0 +1,95 @@
+%{!?__python2: %global __python2 /usr/bin/python2}
+%{!?python2_sitelib: %global python2_sitelib %(%{__python2} -c "from distutils.sysconfig import get_python_lib; print(get_python_lib())")}
+
+%if 0%{?fedora}
+%global with_python3 1
+%endif
+
+%define module_name jwcrypto
+
+Name:           python-jwcrypto
+Version:        0.2.1
+Release:        1%{?dist}
+Summary:        Implements JWK,JWS,JWE specifications using python-cryptography
+
+License:        LGPLv3+
+URL:            https://github.com/simo5/%{module_name}
+Source0:        https://github.com/simo5/%{module_name}/releases/download/v%{version}/jwcrypto-%{version}.tar.gz
+Source1:        https://github.com/simo5/%{module_name}/releases/download/v%{version}/jwcrypto-%{version}.tar.gz.sha512sum.txt
+
+BuildArch:      noarch
+BuildRequires:  python-devel
+BuildRequires:  python-setuptools
+BuildRequires:  python-cryptography
+BuildRequires:  pytest
+Requires:       python-cryptography
+
+%if 0%{?with_python3}
+BuildRequires:      python3-devel
+BuildRequires:      python3-setuptools
+BuildRequires:      python3-cryptography
+BuildRequires:      python3-pytest
+%endif
+
+%description
+Implements JWK,JWS,JWE specifications using python-cryptography
+
+%if 0%{?with_python3}
+%package -n python3-jwcrypto
+Summary:            Implements JWK,JWS,JWE specifications using python3-cryptography
+Requires:           python3-cryptography
+
+%description -n python3-jwcrypto
+Implements JWK,JWS,JWE specifications using python3-cryptography
+%endif
+
+%prep
+grep `sha512sum %{SOURCE0}` %{SOURCE1} || (echo "Checksum invalid!" && exit 1)
+%setup -q -n %{module_name}-%{version}
+
+
+%build
+%{__python2} setup.py build
+%if 0%{?with_python3}
+%{__python3} setup.py build
+%endif
+
+
+%install
+%{__python2} setup.py install -O1 --skip-build --root %{buildroot}
+%if 0%{?with_python3}
+%{__python3} setup.py install -O1 --skip-build --root %{buildroot}
+%endif
+rm -rf %{buildroot}%{_docdir}/%{module_name}
+rm -rf %{buildroot}%{python2_sitelib}/%{module_name}/tests{,-cookbook}.py*
+%if 0%{?with_python3}
+rm -rf %{buildroot}%{python3_sitelib}/%{module_name}/tests{,-cookbook}.py*
+rm -rf %{buildroot}%{python3_sitelib}/%{module_name}/__pycache__/tests{,-cookbook}.*.py*
+%endif
+
+
+%check
+%{__python2} -m py.test -vv ./%{module_name}/tests{,-cookbook}.py
+%if 0%{?with_python3}
+%{__python3} -m py.test -vv ./%{module_name}/tests{,-cookbook}.py
+%endif
+
+
+%files
+%doc README.md
+%license LICENSE
+%{python2_sitelib}/%{module_name}
+%{python2_sitelib}/%{module_name}-*.egg-info
+
+%if 0%{?with_python3}
+%files -n python3-jwcrypto
+%doc README.md
+%license LICENSE
+%{python3_sitelib}/%{module_name}
+%{python3_sitelib}/%{module_name}-*.egg-info
+%endif
+
+
+%changelog
+* Thu Mar 31 2016 Christian Heimes <cheimes@redhat.com> - 0.2.1-1
+- Initial packaging
